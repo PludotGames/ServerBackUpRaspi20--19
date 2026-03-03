@@ -83,12 +83,23 @@ systemctl enable --now mariadb
 # ── 2. Secure MariaDB ─────────────────────────────────────────────────────────
 log "Configuring MariaDB (setting root password, securing install)..."
 
-mysql -u root <<EOF
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_PASS}';
+# On a fresh install MariaDB uses unix_socket auth — run as system root with no password
+mysql <<EOF
+-- Switch root to password authentication and set the password
+ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${DB_PASS}');
+
+-- Remove anonymous users
 DELETE FROM mysql.user WHERE User='';
+
+-- Disallow remote root login
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+
+-- Remove test database
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+
+-- Apply changes
+FLUSH PRIVILEGES;
 EOF
 
 log "MariaDB secured. Root password: ${DB_PASS}"
@@ -118,11 +129,33 @@ log "Database restore complete."
 # ── 4. Restore /var/www/html ──────────────────────────────────────────────────
 log "Restoring web root (${WEBROOT})..."
 
+# Wipe current contents
 rm -rf "${WEBROOT:?}"/*
-tar -xzf "${BACKUP_DIR}/webroot.tar.gz" -C /
 
+# Extract into a temp dir first so we can move contents reliably
+TEMP_WEB_DIR=$(mktemp -d)
+tar -xzf "${BACKUP_DIR}/webroot.tar.gz" -C "${TEMP_WEB_DIR}"
+
+# Find the actual html folder inside the extracted archive (handles path nesting)
+EXTRACTED_HTML=$(find "${TEMP_WEB_DIR}" -type d -name "html" | head -n 1)
+
+if [ -z "${EXTRACTED_HTML}" ]; then
+    # Fallback: dump everything directly
+    warn "  Could not locate 'html' dir in archive, extracting directly to ${WEBROOT}..."
+    tar -xzf "${BACKUP_DIR}/webroot.tar.gz" --strip-components=3 -C "${WEBROOT}"
+else
+    log "  Found web root at: ${EXTRACTED_HTML}"
+    cp -a "${EXTRACTED_HTML}/." "${WEBROOT}/"
+fi
+
+rm -rf "${TEMP_WEB_DIR}"
+
+# Fix ownership and permissions
 chown -R www-data:www-data "${WEBROOT}"
 chmod -R 755 "${WEBROOT}"
+
+log "Web root restore complete. Contents:"
+ls -lah "${WEBROOT}" | tee -a /dev/null
 
 log "Web root restore complete."
 
@@ -131,7 +164,21 @@ if [ -f "${BACKUP_DIR}/pythonscripts.tar.gz" ]; then
     log "Restoring Python scripts (${PYTHON_SCRIPTS})..."
 
     mkdir -p "${PYTHON_SCRIPTS}"
-    tar -xzf "${BACKUP_DIR}/pythonscripts.tar.gz" -C /
+
+    TEMP_PY_DIR=$(mktemp -d)
+    tar -xzf "${BACKUP_DIR}/pythonscripts.tar.gz" -C "${TEMP_PY_DIR}"
+
+    EXTRACTED_PY=$(find "${TEMP_PY_DIR}" -type d -name "pythonscripts" | head -n 1)
+
+    if [ -z "${EXTRACTED_PY}" ]; then
+        warn "  Could not locate 'pythonscripts' dir in archive, extracting directly..."
+        tar -xzf "${BACKUP_DIR}/pythonscripts.tar.gz" --strip-components=1 -C "${PYTHON_SCRIPTS}"
+    else
+        log "  Found scripts at: ${EXTRACTED_PY}"
+        cp -a "${EXTRACTED_PY}/." "${PYTHON_SCRIPTS}/"
+    fi
+
+    rm -rf "${TEMP_PY_DIR}"
 
     # Recreate the virtual environment fresh (dhenv was excluded from backup)
     log "  Recreating Python virtual environment (${VENV_NAME})..."
