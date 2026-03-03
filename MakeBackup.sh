@@ -47,10 +47,10 @@ log "Securing MariaDB installation..."
 
 DB_ROOT_PASS="stemdb"
 
-# Set root password and apply security settings via SQL
-mysql -u root <<EOF
--- Set root password
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
+# On a fresh install MariaDB uses unix_socket auth — run as system root with no password
+mysql <<EOF
+-- Switch root to password authentication and set the password
+ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${DB_ROOT_PASS}');
 
 -- Remove anonymous users
 DELETE FROM mysql.user WHERE User='';
@@ -64,6 +64,7 @@ DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
 
 -- NOTE: Privilege tables are NOT reloaded (as per config: Reload = n)
 -- They will be reloaded on next MariaDB restart
+FLUSH PRIVILEGES;
 EOF
 
 log "MariaDB secured. Root password set to: ${DB_ROOT_PASS}"
